@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 Benjamin Chess
-use std::path::{Path, PathBuf};
-use std::io::{Read, BufReader};
-use std::fs::{OpenOptions, File};
-use std::os::unix::fs::OpenOptionsExt;
-use std::sync::{Arc, atomic::AtomicBool};
-use dashmap::{DashMap, DashSet};
 use crossbeam::channel::{unbounded, Receiver, Sender};
+use dashmap::{DashMap, DashSet};
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, Read};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::{atomic::AtomicBool, Arc};
 use tokio::sync::Notify;
 
 pub type ByteArray = Vec<u8>;
@@ -55,7 +55,12 @@ impl WalRecord {
             Some(v)
         };
 
-        Ok(Some(WalRecord { rev, key, value, written_notify: None }))
+        Ok(Some(WalRecord {
+            rev,
+            key,
+            value,
+            written_notify: None,
+        }))
     }
 }
 
@@ -68,7 +73,11 @@ pub struct WalManager {
 }
 
 impl WalManager {
-    pub fn new(wal_dir: &Path, default_mode: WalMode, prefix_modes_no_persist: DashSet<ByteArray>) -> std::io::Result<Self> {
+    pub fn new(
+        wal_dir: &Path,
+        default_mode: WalMode,
+        prefix_modes_no_persist: DashSet<ByteArray>,
+    ) -> std::io::Result<Self> {
         let wal_dir = wal_dir.to_path_buf();
         std::fs::create_dir_all(&wal_dir)?;
 
@@ -86,7 +95,10 @@ impl WalManager {
         Ok(s)
     }
 
-    fn spawn_writer_threads(writers_with_work_rx: Receiver<Arc<PerPrefixWriter>>, writers_with_work_tx: Sender<Arc<PerPrefixWriter>>) {
+    fn spawn_writer_threads(
+        writers_with_work_rx: Receiver<Arc<PerPrefixWriter>>,
+        writers_with_work_tx: Sender<Arc<PerPrefixWriter>>,
+    ) {
         for _ in 0..std::thread::available_parallelism().unwrap().get() {
             let rx = writers_with_work_rx.clone();
             let tx = writers_with_work_tx.clone();
@@ -96,19 +108,30 @@ impl WalManager {
                         // no work to do
                         continue;
                     }
-                    if writer.is_writing.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_err() {
+                    if writer
+                        .is_writing
+                        .compare_exchange(
+                            false,
+                            true,
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                        )
+                        .is_err()
+                    {
                         // is already writing
                         continue;
                     }
                     writer.write_locked().unwrap();
-                    writer.is_writing.store(false, std::sync::atomic::Ordering::SeqCst);
+                    writer
+                        .is_writing
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
                     if !writer.to_write_rx.is_empty() {
                         // if writer didn't write everything there is still more work to do
                         tx.send(writer.clone()).unwrap();
                     }
                 }
             });
-        };
+        }
     }
 
     pub fn default_mode(&self) -> WalMode {
@@ -116,18 +139,35 @@ impl WalManager {
     }
 
     // append is to be called in rev order
-    pub fn append(&self, prefix: &[u8], rev: i64, key: &[u8], value: Option<&[u8]>, written_notify: Option<Arc<Notify>>) {
+    pub fn append(
+        &self,
+        prefix: &[u8],
+        rev: i64,
+        key: &[u8],
+        value: Option<&[u8]>,
+        written_notify: Option<Arc<Notify>>,
+    ) {
         if self.default_mode == WalMode::None || self.prefix_modes_no_persist.contains(prefix) {
             return;
         }
 
-        let writer = self.writers.entry(prefix.to_vec()).or_insert_with(||
-            Arc::new(PerPrefixWriter::open_for_prefix(&self.wal_dir, &prefix, self.default_mode).expect("open WAL file"))
-        );
-        writer.to_write_tx.send(WalRecord { rev, key: key.to_vec(), value: value.map(|v| v.to_vec()), written_notify }).unwrap();
+        let writer = self.writers.entry(prefix.to_vec()).or_insert_with(|| {
+            Arc::new(
+                PerPrefixWriter::open_for_prefix(&self.wal_dir, &prefix, self.default_mode)
+                    .expect("open WAL file"),
+            )
+        });
+        writer
+            .to_write_tx
+            .send(WalRecord {
+                rev,
+                key: key.to_vec(),
+                value: value.map(|v| v.to_vec()),
+                written_notify,
+            })
+            .unwrap();
         self.writers_with_work_tx.send(writer.clone()).unwrap();
     }
-
 }
 
 struct PerPrefixWriter {
@@ -142,7 +182,9 @@ struct PerPrefixWriter {
 impl PerPrefixWriter {
     fn open_for_prefix(wal_dir: &Path, prefix: &[u8], mode: WalMode) -> std::io::Result<Self> {
         let path = wal_dir.join(Self::file_name_for_prefix(prefix));
-        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -165,7 +207,9 @@ impl PerPrefixWriter {
     fn file_name_for_prefix(prefix: &[u8]) -> String {
         // Encode prefix bytes as hex to make a safe filename
         let mut s = String::from("prefix_");
-        for b in prefix { s.push_str(&format!("{:02x}", b)); }
+        for b in prefix {
+            s.push_str(&format!("{:02x}", b));
+        }
         s.push_str(".wal");
         s
     }
@@ -177,75 +221,142 @@ impl PerPrefixWriter {
         let end_size = 16384;
 
         let mut current_size = 0;
-        let mut iovs_vec: Vec<libc::iovec> = Vec::with_capacity(16);
-        let mut notify_vec: Vec<Arc<Notify>> = Vec::with_capacity(16);
+        let mut records: Vec<WalRecord> = Vec::with_capacity(16);
 
         // Batch up things to write
         while current_size < end_size && std::time::Instant::now() < end_time {
-            let mut rec = match self.to_write_rx.recv_deadline(end_time) {
+            let rec = match self.to_write_rx.recv_deadline(end_time) {
                 Ok(rec) => rec,
                 Err(_) => break,
             };
 
-            // Build header and iovecs from provided slices
-            let key_bytes: &[u8] = &rec.key;
-            let val_opt: Option<&[u8]> = rec.value.as_deref();
-            let key_len = key_bytes.len() as u32;
-            let value_len = val_opt.map(|v| v.len() as u32).unwrap_or(WalRecord::DELETE_MARKER);
+            current_size += rec.key.len() + rec.value.as_ref().map_or(0, |v| v.len()) + 16; // 16 is header size
+            records.push(rec);
+        }
+
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let mut headers: Vec<[u8; 16]> = Vec::with_capacity(records.len());
+        for rec in &records {
+            let key_len = rec.key.len() as u32;
+            let value_len = rec
+                .value
+                .as_ref()
+                .map(|v| v.len() as u32)
+                .unwrap_or(WalRecord::DELETE_MARKER);
             let mut header = [0u8; 16];
             header[0..8].copy_from_slice(&(rec.rev as u64).to_le_bytes());
             header[8..12].copy_from_slice(&key_len.to_le_bytes());
             header[12..16].copy_from_slice(&value_len.to_le_bytes());
+            headers.push(header);
+        }
 
-            let iov0 = libc::iovec { iov_base: header.as_ptr() as *mut _, iov_len: header.len() };
-            let iov1 = if key_len > 0 { Some(libc::iovec { iov_base: key_bytes.as_ptr() as *mut _, iov_len: key_bytes.len() }) } else { None };
-            let iov2 = match val_opt { Some(v) if !v.is_empty() => Some(libc::iovec { iov_base: v.as_ptr() as *mut _, iov_len: v.len() }), _ => None };
-            iovs_vec.push(iov0);
-            if let Some(k) = iov1 { iovs_vec.push(k); }
-            if let Some(v) = iov2 { iovs_vec.push(v); }
-
-            current_size += rec.key.len() + rec.value.as_ref().map_or(0, |v| v.len()) + 16; // 16 is header size
-
-            if let Some(notify) = rec.written_notify.take() {
-                notify_vec.push(notify);
+        let mut iovs_vec: Vec<libc::iovec> = Vec::with_capacity(records.len() * 3);
+        for (rec, header) in records.iter().zip(headers.iter()) {
+            iovs_vec.push(libc::iovec {
+                iov_base: header.as_ptr() as *mut _,
+                iov_len: header.len(),
+            });
+            if !rec.key.is_empty() {
+                iovs_vec.push(libc::iovec {
+                    iov_base: rec.key.as_ptr() as *mut _,
+                    iov_len: rec.key.len(),
+                });
+            }
+            if let Some(value) = rec.value.as_ref().filter(|v| !v.is_empty()) {
+                iovs_vec.push(libc::iovec {
+                    iov_base: value.as_ptr() as *mut _,
+                    iov_len: value.len(),
+                });
             }
         }
 
-        let mut remaining = current_size;
-        let mut iovs_offset = 0;
-        while remaining > 0 {
-            let res = unsafe { libc::writev(self.fd, iovs_vec.as_ptr().add(iovs_offset), iovs_vec.len() as i32) };
-            if res < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted { continue; }
-                return Err(err);
+        Self::write_all_iovecs(self.fd, &mut iovs_vec)?;
+
+        if self.mode == WalMode::Sync {
+            Self::fsync_all(self.fd)?;
+        }
+
+        for mut rec in records {
+            if let Some(notify) = rec.written_notify.take() {
+                notify.notify_one();
             }
-            let mut wrote = res as usize;
-            remaining -= wrote;
-            if remaining == 0 {
-                // Most common that we wrote everything
+        }
+
+        Ok(())
+    }
+
+    fn write_all_iovecs(fd: libc::c_int, iovs: &mut [libc::iovec]) -> std::io::Result<()> {
+        let max_iovs = unsafe {
+            let value = libc::sysconf(libc::_SC_IOV_MAX);
+            if value > 0 {
+                value as usize
+            } else {
+                1024
+            }
+        };
+        let max_iovs = max_iovs.max(1);
+        let mut offset = 0;
+
+        while offset < iovs.len() {
+            while offset < iovs.len() && iovs[offset].iov_len == 0 {
+                offset += 1;
+            }
+            if offset == iovs.len() {
                 break;
             }
+
+            let count = std::cmp::min(max_iovs, iovs.len() - offset);
+            let res = unsafe { libc::writev(fd, iovs.as_ptr().add(offset), count as i32) };
+            if res < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            if res == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "writev wrote zero bytes",
+                ));
+            }
+
+            let mut wrote = res as usize;
             while wrote > 0 {
-                if wrote >= iovs_vec[iovs_offset].iov_len as usize {
-                    wrote -= iovs_vec[iovs_offset].iov_len as usize;
-                    iovs_offset += 1;
+                if wrote >= iovs[offset].iov_len {
+                    wrote -= iovs[offset].iov_len;
+                    offset += 1;
+                    if offset == iovs.len() {
+                        break;
+                    }
                 } else {
-                    iovs_vec[iovs_offset].iov_len -= wrote;
-                    iovs_vec[iovs_offset].iov_base = unsafe { (iovs_vec[iovs_offset].iov_base as *mut u8).add(wrote) } as *mut _;
+                    iovs[offset].iov_base =
+                        unsafe { (iovs[offset].iov_base as *mut u8).add(wrote) } as *mut _;
+                    iovs[offset].iov_len -= wrote;
                     wrote = 0;
                 }
             }
         }
-        if self.mode == WalMode::Sync {
-            unsafe { libc::fsync(self.fd); }
-        }
-
-        for notify in notify_vec {
-            notify.notify_one();
-        }
 
         Ok(())
+    }
+
+    fn fsync_all(fd: libc::c_int) -> std::io::Result<()> {
+        loop {
+            let res = unsafe { libc::fsync(fd) };
+            if res == 0 {
+                return Ok(());
+            }
+
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
     }
 }
 
@@ -257,7 +368,9 @@ where
     F: FnMut(WalRecord),
 {
     let mut readers: Vec<(i32, BufReader<File>, Option<WalRecord>)> = vec![];
-    if !wal_dir.exists() { return Ok(()); }
+    if !wal_dir.exists() {
+        return Ok(());
+    }
     for entry in std::fs::read_dir(wal_dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -273,15 +386,35 @@ where
     use std::cmp::Ordering;
     use std::collections::BinaryHeap;
     #[derive(Debug)]
-    struct HeapItem { idx: usize, rev: i64 }
-    impl PartialEq for HeapItem { fn eq(&self, other: &Self) -> bool { self.rev == other.rev } }
+    struct HeapItem {
+        idx: usize,
+        rev: i64,
+    }
+    impl PartialEq for HeapItem {
+        fn eq(&self, other: &Self) -> bool {
+            self.rev == other.rev
+        }
+    }
     impl Eq for HeapItem {}
-    impl PartialOrd for HeapItem { fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(other.rev.cmp(&self.rev)) } }
-    impl Ord for HeapItem { fn cmp(&self, other: &Self) -> Ordering { other.rev.cmp(&self.rev) } }
+    impl PartialOrd for HeapItem {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(other.rev.cmp(&self.rev))
+        }
+    }
+    impl Ord for HeapItem {
+        fn cmp(&self, other: &Self) -> Ordering {
+            other.rev.cmp(&self.rev)
+        }
+    }
 
     let mut heap = BinaryHeap::new();
     for (i, (_, _, rec_opt)) in readers.iter().enumerate() {
-        if let Some(rec) = rec_opt { heap.push(HeapItem { idx: i, rev: rec.rev }); }
+        if let Some(rec) = rec_opt {
+            heap.push(HeapItem {
+                idx: i,
+                rev: rec.rev,
+            });
+        }
     }
 
     while let Some(HeapItem { idx, .. }) = heap.pop() {
@@ -291,7 +424,9 @@ where
             // load next for this reader
             let next = WalRecord::read_from(reader)?;
             readers[idx].2 = next;
-            if let Some(rec) = &readers[idx].2 { heap.push(HeapItem { idx, rev: rec.rev }); }
+            if let Some(rec) = &readers[idx].2 {
+                heap.push(HeapItem { idx, rev: rec.rev });
+            }
         }
     }
 
